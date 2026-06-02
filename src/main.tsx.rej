@@ -1,0 +1,220 @@
+--- src/main.tsx	2026-05-28 16:54:01.869199530 +0000
++++ /opt/Olc-cost-l/packaging/golden-panel/main.tsx	2026-05-28 16:53:34.824494225 +0000
+@@ -541,7 +1023,6 @@
+   payload: Record<string, string>;
+   link: string;
+   dns: string;
+-  proxy?: Socks5Proxy;
+   running: boolean;
+   runtime: RuntimeState;
+ };
+@@ -638,14 +1119,7 @@
+   transport: string;
+   payload: Record<string, string>;
+   dns: string;
+-  proxy: Socks5Proxy;
+-};
+-
+-type Socks5Proxy = {
+-  addr: string;
+-  port: string;
+-  user: string;
+-  pass: string;
++  link?: string;
+ };
+ 
+ type ClientForm = {
+@@ -681,7 +1158,7 @@
+   transport: "datachannel",
+   payload: {},
+   dns: "1.1.1.1:53",
+-  proxy: { addr: "", port: "", user: "", pass: "" },
++  link: "tor",
+ };
+ 
+ const defaultForm: ClientForm = {
+@@ -1234,11 +2023,11 @@
+ 
+ 
+ function roomPlaceholder(carrier: string) {
+-  return carrier === "jitsi" ? "https://meet1.arbitr.ru/room" : "room-id";
++  return carrier === "jitsi" ? "https://meet.example.org/room" : "room-id";
+ }
+ 
+ function normalizeLocationForm(location: ClientLocationForm): ClientLocationForm {
+-  const options = transportOptions(location.carrier);
++  const options = transportOptions(location.carrier, location.transport);
+   const transport = options.includes(location.transport) ? location.transport : options[0];
+   const fields = payloadFields[transport] ?? [];
+   const allowed = new Set(fields.map((field) => field.key));
+@@ -1246,12 +2035,13 @@
+   for (const field of fields) {
+     if (!payload[field.key]?.trim()) payload[field.key] = field.defaultValue;
+   }
+-  return {
++  const link = (location.link?.trim() || "tor").toLowerCase();
++  return mergeInstanceDefaults({
+     ...location,
+     transport,
+     payload,
+-    proxy: location.proxy ?? { addr: "", port: "", user: "", pass: "" },
+-  };
++    link: link === "direct" ? "direct" : "tor",
++  });
+ }
+ 
+ function normalizeForm(form: ClientForm): ClientForm {
+@@ -1398,33 +2185,10 @@
+     transport: location.transport,
+     payload: payloadForSubmit(location.payload),
+     dns: location.dns.trim(),
+-    proxy: proxyForSubmit(location.proxy),
++    link: (location.link?.trim() || "tor").toLowerCase(),
+   }));
+ }
+ 
+-function proxyForSubmit(proxy: Socks5Proxy) {
+-  const addr = proxy.addr.trim();
+-  const port = Number(proxy.port) || 0;
+-  const user = proxy.user.trim();
+-  const pass = proxy.pass;
+-  if (!addr && !port && !user && !pass) return undefined;
+-  return {
+-    addr,
+-    port,
+-    user,
+-    pass,
+-  };
+-}
+-
+-function proxyFromState(proxy?: Partial<Socks5Proxy> & { port?: string | number }): Socks5Proxy {
+-  return {
+-    addr: proxy?.addr ?? "",
+-    port: proxy?.port ? String(proxy.port) : "",
+-    user: proxy?.user ?? "",
+-    pass: proxy?.pass ?? "",
+-  };
+-}
+-
+ function quotaText(quota?: Quota) {
+   if (!quota) return "none";
+   const parts = [];
+@@ -1881,50 +2710,6 @@
+           placeholder="1.1.1.1:53"
+         />
+       </label>
+-      <div className="grid gap-3 rounded-md border border-border bg-background p-3">
+-        <div className="text-sm font-medium text-foreground">Upstream SOCKS5</div>
+-        <div className="grid gap-3 md:grid-cols-2">
+-          <label className="grid gap-2 text-sm text-muted-foreground">
+-            Host
+-            <input
+-              className="h-10 rounded-md border border-border bg-card px-3 text-foreground outline-none focus:border-primary"
+-              value={location.proxy.addr}
+-              onChange={(event) => set({ proxy: { ...location.proxy, addr: event.target.value } })}
+-              placeholder="127.0.0.1"
+-            />
+-          </label>
+-          <label className="grid gap-2 text-sm text-muted-foreground">
+-            Port
+-            <input
+-              className="h-10 rounded-md border border-border bg-card px-3 text-foreground outline-none focus:border-primary"
+-              type="number"
+-              min="1"
+-              max="65535"
+-              value={location.proxy.port}
+-              onChange={(event) => set({ proxy: { ...location.proxy, port: event.target.value } })}
+-              placeholder="1080"
+-            />
+-          </label>
+-          <label className="grid gap-2 text-sm text-muted-foreground">
+-            User
+-            <input
+-              className="h-10 rounded-md border border-border bg-card px-3 text-foreground outline-none focus:border-primary"
+-              value={location.proxy.user}
+-              onChange={(event) => set({ proxy: { ...location.proxy, user: event.target.value } })}
+-            />
+-          </label>
+-          <label className="grid gap-2 text-sm text-muted-foreground">
+-            Password
+-            <input
+-              className="h-10 rounded-md border border-border bg-card px-3 text-foreground outline-none focus:border-primary"
+-              type="password"
+-              value={location.proxy.pass}
+-              onChange={(event) => set({ proxy: { ...location.proxy, pass: event.target.value } })}
+-              autoComplete="off"
+-            />
+-          </label>
+-        </div>
+-      </div>
+       {fields.length > 0 && (
+         <div className="grid gap-3 rounded-md border border-border bg-background p-3">
+           <div className="text-sm font-medium text-foreground">Параметры транспорта</div>
+@@ -2173,50 +2969,6 @@
+                 placeholder="1.1.1.1:53"
+               />
+             </label>
+-            <div className="grid gap-3 rounded-md border border-border bg-card p-3">
+-              <div className="text-sm font-medium text-foreground">Upstream SOCKS5</div>
+-              <div className="grid gap-3 md:grid-cols-2">
+-                <label className="grid gap-2 text-sm text-muted-foreground">
+-                  Host
+-                  <input
+-                    className="h-10 rounded-md border border-border bg-background px-3 text-foreground outline-none focus:border-primary"
+-                    value={location.proxy.addr}
+-                    onChange={(event) => setLocation(index, { proxy: { ...location.proxy, addr: event.target.value } })}
+-                    placeholder="127.0.0.1"
+-                  />
+-                </label>
+-                <label className="grid gap-2 text-sm text-muted-foreground">
+-                  Port
+-                  <input
+-                    className="h-10 rounded-md border border-border bg-background px-3 text-foreground outline-none focus:border-primary"
+-                    type="number"
+-                    min="1"
+-                    max="65535"
+-                    value={location.proxy.port}
+-                    onChange={(event) => setLocation(index, { proxy: { ...location.proxy, port: event.target.value } })}
+-                    placeholder="1080"
+-                  />
+-                </label>
+-                <label className="grid gap-2 text-sm text-muted-foreground">
+-                  User
+-                  <input
+-                    className="h-10 rounded-md border border-border bg-background px-3 text-foreground outline-none focus:border-primary"
+-                    value={location.proxy.user}
+-                    onChange={(event) => setLocation(index, { proxy: { ...location.proxy, user: event.target.value } })}
+-                  />
+-                </label>
+-                <label className="grid gap-2 text-sm text-muted-foreground">
+-                  Password
+-                  <input
+-                    className="h-10 rounded-md border border-border bg-background px-3 text-foreground outline-none focus:border-primary"
+-                    type="password"
+-                    value={location.proxy.pass}
+-                    onChange={(event) => setLocation(index, { proxy: { ...location.proxy, pass: event.target.value } })}
+-                    autoComplete="off"
+-                  />
+-                </label>
+-              </div>
+-            </div>
+             {fields.length > 0 && (
+               <div className="grid gap-3 rounded-md border border-border bg-card p-3">
+                 <div className="text-sm font-medium text-foreground">Параметры транспорта</div>
+@@ -4579,7 +5240,7 @@
+         transport: location.transport,
+         payload: location.payload ?? {},
+         dns: location.dns,
+-        proxy: proxyFromState(location.proxy),
++        link: location.link,
+       }),
+     );
+   };
+@@ -4668,7 +5329,6 @@
+               transport: location.transport,
+               payload: location.payload ?? {},
+               dns: location.dns,
+-              proxy: proxyFromState(location.proxy),
+             },
+       );
+       await request(`/api/clients/${encodeURIComponent(editLocation.client.client_id)}`, {
