@@ -104,19 +104,27 @@ type Quota struct {
 }
 
 type Location struct {
-	Name      string    `json:"name"`
-	ClientID  string    `json:"client-id"`
-	Endpoint  Endpoint  `json:"endpoint"`
-	Carrier   string    `json:"carrier"`
-	Transport Transport `json:"transport"`
-	Link      string    `json:"link"`
-	Data      string    `json:"data"`
-	DNS       string    `json:"dns"`
+	Name      string      `json:"name"`
+	ClientID  string      `json:"client-id"`
+	Endpoint  Endpoint    `json:"endpoint"`
+	Carrier   string      `json:"carrier"`
+	Transport Transport   `json:"transport"`
+	Link      string      `json:"link"`
+	Data      string      `json:"data"`
+	DNS       string      `json:"dns"`
+	Proxy     Socks5Proxy `json:"proxy,omitempty"`
 }
 
 type Endpoint struct {
 	RoomID string `json:"room_id"`
 	Key    string `json:"key"`
+}
+
+type Socks5Proxy struct {
+	Addr string `json:"addr,omitempty"`
+	Port int    `json:"port,omitempty"`
+	User string `json:"user,omitempty"`
+	Pass string `json:"pass,omitempty"`
 }
 
 type Transport struct {
@@ -167,6 +175,8 @@ type olcrtcNetConfig struct {
 type olcrtcSocksConfig struct {
 	ProxyAddr             string `yaml:"proxy_addr,omitempty"`
 	ProxyPort             int    `yaml:"proxy_port,omitempty"`
+	ProxyUser             string `yaml:"proxy_user,omitempty"`
+	ProxyPass             string `yaml:"proxy_pass,omitempty"`
 	DirectCIDRsFile       string `yaml:"direct_cidrs_file,omitempty"`
 	DirectDomainsFile     string `yaml:"direct_domains_file,omitempty"`
 	BlockedTorDomainsFile string `yaml:"blocked_tor_domains_file,omitempty"`
@@ -650,11 +660,22 @@ func run() error {
 		Handler:           securityHeaders(updateGuardMiddleware(handler)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	tlsCert, tlsKey, tlsEnabled, err := tlsFilesFromEnv()
+	if err != nil {
+		return err
+	}
 
 	errc := make(chan error, 1)
 	go func() {
 		log.Printf("serving subscription and admin panel on %s", server.Addr)
-		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if tlsEnabled {
+			log.Printf("TLS enabled with certificate %s", tlsCert)
+			err = server.ListenAndServeTLS(tlsCert, tlsKey)
+		} else {
+			err = server.ListenAndServe()
+		}
+		if !errors.Is(err, http.ErrServerClosed) {
 			errc <- err
 			return
 		}
@@ -807,12 +828,16 @@ func (s *Supervisor) State() State {
 	defer s.mu.RUnlock()
 
 	clients := make(map[string][]LocationState)
+	peerCount := 0
 	for _, loc := range s.cfg.Locations {
 		key := locationKey(loc)
 		p, exists := s.processes[key]
 		runtime := RuntimeState{Status: "stopped"}
 		if exists {
 			runtime = p.state()
+		}
+		if runtime.PeerCount != nil {
+			peerCount += *runtime.PeerCount
 		}
 		clients[loc.ClientID] = append(clients[loc.ClientID], LocationState{
 			Name:      loc.Name,
@@ -824,6 +849,7 @@ func (s *Supervisor) State() State {
 			Payload:   loc.Transport.Payload,
 			Link:      loc.Link,
 			DNS:       loc.DNS,
+			Proxy:     loc.Proxy,
 			Running:   runtime.Running,
 			Runtime:   runtime,
 		})
@@ -845,6 +871,7 @@ func (s *Supervisor) State() State {
 		Refresh:          s.cfg.Refresh,
 		ClientCount:      len(clientIDs),
 		RunningCount:     s.runningCountLocked(),
+		PeerCount:        peerCount,
 		Clients:          make([]ClientState, 0, len(clientIDs)),
 	}
 	for _, id := range clientIDs {
@@ -1052,6 +1079,7 @@ type State struct {
 	Refresh          string        `json:"refresh,omitempty"`
 	ClientCount      int           `json:"client_count"`
 	RunningCount     int           `json:"running_count"`
+	PeerCount        int           `json:"peer_count"`
 	Clients          []ClientState `json:"clients"`
 }
 
@@ -1072,20 +1100,23 @@ type LocationState struct {
 	Payload   map[string]string `json:"payload"`
 	Link      string            `json:"link"`
 	DNS       string            `json:"dns"`
+	Proxy     Socks5Proxy       `json:"proxy,omitempty"`
 	Running   bool              `json:"running"`
 	Runtime   RuntimeState      `json:"runtime"`
 }
 
 type RuntimeState struct {
-	Status      string `json:"status"`
-	Running     bool   `json:"running"`
-	PID         int    `json:"pid,omitempty"`
-	MemoryBytes uint64 `json:"memory_bytes,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
-	ExitedAt    string `json:"exited_at,omitempty"`
-	ExitError   string `json:"exit_error,omitempty"`
-	LogCount    int    `json:"log_count"`
-	Restarts    int    `json:"restarts"`
+	Status      string   `json:"status"`
+	Running     bool     `json:"running"`
+	PID         int      `json:"pid,omitempty"`
+	MemoryBytes uint64   `json:"memory_bytes,omitempty"`
+	StartedAt   string   `json:"started_at,omitempty"`
+	ExitedAt    string   `json:"exited_at,omitempty"`
+	ExitError   string   `json:"exit_error,omitempty"`
+	LogCount    int      `json:"log_count"`
+	Restarts    int      `json:"restarts"`
+	PeerCount   *int     `json:"peer_count,omitempty"`
+	PeerDevices []string `json:"peer_devices,omitempty"`
 }
 
 type LogLine struct {
@@ -1106,6 +1137,7 @@ type addClientRequest struct {
 	Transport  string            `json:"transport"`
 	Payload    map[string]string `json:"payload"`
 	DNS        string            `json:"dns"`
+	Proxy      Socks5Proxy       `json:"proxy"`
 	Name       string            `json:"name"`
 }
 
@@ -1120,6 +1152,7 @@ type updateClientRequest struct {
 	Transport string            `json:"transport"`
 	Payload   map[string]string `json:"payload"`
 	DNS       string            `json:"dns"`
+	Proxy     Socks5Proxy       `json:"proxy"`
 	Name      string            `json:"name"`
 }
 
@@ -1131,6 +1164,7 @@ type locationRequest struct {
 	Transport string            `json:"transport"`
 	Payload   map[string]string `json:"payload"`
 	DNS       string            `json:"dns"`
+	Proxy     Socks5Proxy       `json:"proxy"`
 	Link      string            `json:"link"`
 }
 
@@ -1543,6 +1577,7 @@ func updateRequestHasLocations(req updateClientRequest) bool {
 		req.Transport != "" ||
 		req.DNS != "" ||
 		req.Name != "" ||
+		req.Proxy != (Socks5Proxy{}) ||
 		len(req.Payload) > 0
 }
 
@@ -1550,7 +1585,7 @@ func createLocationsFromRequest(cfg Config, req addClientRequest) ([]Location, e
 	if len(req.Locations) > 0 {
 		return buildLocations(req.ClientID, req.Locations)
 	}
-	if req.RoomID != "" || req.Key != "" || req.Carrier != "" || req.Transport != "" || req.DNS != "" || req.Name != "" {
+	if req.RoomID != "" || req.Key != "" || req.Carrier != "" || req.Transport != "" || req.DNS != "" || req.Name != "" || req.Proxy != (Socks5Proxy{}) {
 		return buildLocations(req.ClientID, []locationRequest{{
 			Name:      req.Name,
 			RoomID:    req.RoomID,
@@ -1559,6 +1594,7 @@ func createLocationsFromRequest(cfg Config, req addClientRequest) ([]Location, e
 			Transport: req.Transport,
 			Payload:   req.Payload,
 			DNS:       req.DNS,
+			Proxy:     req.Proxy,
 		}})
 	}
 	return templateLocations(cfg, req.FromClient)
@@ -1602,6 +1638,7 @@ func buildLocations(clientID string, requests []locationRequest) ([]Location, er
 		req.Transport = strings.TrimSpace(req.Transport)
 		req.Payload = cleanPayload(req.Payload)
 		req.DNS = strings.TrimSpace(req.DNS)
+		req.Proxy = normalizeProxy(req.Proxy)
 
 		prefix := fmt.Sprintf("locations[%d]", i)
 		if err := validateRoomIDStrict(req.RoomID, req.Carrier); err != nil {
@@ -1623,6 +1660,9 @@ func buildLocations(clientID string, requests []locationRequest) ([]Location, er
 		if err := validatePayload(transportConfig); err != nil {
 			return nil, fmt.Errorf("%s.transport: %w", prefix, err)
 		}
+		if err := validateProxy(req.Proxy); err != nil {
+			return nil, fmt.Errorf("%s.proxy: %w", prefix, err)
+		}
 		name := req.Name
 		if name == "" {
 			name = "Default location"
@@ -1636,6 +1676,7 @@ func buildLocations(clientID string, requests []locationRequest) ([]Location, er
 			Link:      defaultString(strings.TrimSpace(req.Link), defaultLocationLink()),
 			Data:      "data",
 			DNS:       dns,
+			Proxy:     req.Proxy,
 		}
 		key := locationKey(loc)
 		if _, ok := seen[key]; ok {
@@ -1656,6 +1697,34 @@ func validateRequestKey(key string) error {
 	}
 	if _, err := hex.DecodeString(key); err != nil {
 		return errors.New("must be 64 hex characters")
+	}
+	return nil
+}
+
+func normalizeProxy(proxy Socks5Proxy) Socks5Proxy {
+	proxy.Addr = strings.TrimSpace(proxy.Addr)
+	proxy.User = strings.TrimSpace(proxy.User)
+	return proxy
+}
+
+func validateProxy(proxy Socks5Proxy) error {
+	if proxy.Addr == "" {
+		if proxy.Port != 0 {
+			return errors.New("addr is required when port is set")
+		}
+		if proxy.User != "" || proxy.Pass != "" {
+			return errors.New("addr is required when credentials are set")
+		}
+		return nil
+	}
+	if proxy.Port <= 0 || proxy.Port > 65535 {
+		return errors.New("port must be between 1 and 65535")
+	}
+	if len(proxy.User) > 255 {
+		return errors.New("user must be at most 255 bytes")
+	}
+	if len(proxy.Pass) > 255 {
+		return errors.New("pass must be at most 255 bytes")
 	}
 	return nil
 }
@@ -2113,9 +2182,18 @@ func serverConfig(loc Location) (olcrtcRuntimeConfig, error) {
 	if err := applyTransportPayload(&cfg, loc.Transport); err != nil {
 		return olcrtcRuntimeConfig{}, err
 	}
+	// Если в Location задан явный Proxy — используем его
+	if loc.Proxy.Addr != "" {
+		cfg.SOCKS = olcrtcSocksConfig{
+			ProxyAddr: loc.Proxy.Addr,
+			ProxyPort: loc.Proxy.Port,
+			ProxyUser: loc.Proxy.User,
+			ProxyPass: loc.Proxy.Pass,
+		}
+	}
 	// link=direct → без Tor/SOCKS; иначе Tor exit + split (RU direct, остальное через SOCKS).
 	useTor := !strings.EqualFold(strings.TrimSpace(loc.Link), "direct")
-	if useTor {
+	if useTor && loc.Proxy.Addr == "" {
 		if proxyAddr, proxyPort := exitProxyFromEnv(); proxyAddr != "" {
 			cfg.SOCKS = olcrtcSocksConfig{
 				ProxyAddr: proxyAddr,
@@ -2452,6 +2530,25 @@ func (b *logBuffer) Count() int {
 	return b.next
 }
 
+func (b *logBuffer) PeerSummary() (int, []string, bool) {
+	lines := b.Snapshot()
+	for i := len(lines) - 1; i >= 0; i-- {
+		if count, devices, ok := parsePeerSummaryLine(lines[i].Line); ok {
+			return count, devices, true
+		}
+	}
+	return 0, nil, false
+}
+
+func parsePeerSummaryLine(line string) (int, []string, bool) {
+	// Парсинг логов olcrtc для извлечения peer count
+	// Формат строки из olcrtc логов (примерный): "peers: 3 [device1, device2, device3]"
+	// Upstream реализация парсит специфичный формат olcrtc
+	// Для совместимости оставляем заглушку, которая возвращает false
+	// TODO: реализовать парсинг согласно формату логов olcrtc
+	return 0, nil, false
+}
+
 type logWriter struct {
 	stream string
 	buffer *logBuffer
@@ -2490,6 +2587,10 @@ func (p *process) state() RuntimeState {
 	if p.cmd != nil && p.cmd.Process != nil && p.running {
 		state.PID = p.cmd.Process.Pid
 		state.MemoryBytes = processMemoryBytes(state.PID)
+	}
+	if count, devices, ok := p.logs.PeerSummary(); ok {
+		state.PeerCount = &count
+		state.PeerDevices = devices
 	}
 	return state
 }
@@ -3471,6 +3572,7 @@ func (c *Config) Normalize() {
 			if loc.ClientID == "" {
 				loc.ClientID = client.ClientID
 			}
+			loc.Proxy = normalizeProxy(loc.Proxy)
 			locations = append(locations, loc)
 		}
 	}
@@ -3513,6 +3615,9 @@ func (c Config) Validate() error {
 		}
 		if loc.Transport.Type == "" {
 			return fmt.Errorf("%s.transport.type is required", prefix)
+		}
+		if err := validateProxy(loc.Proxy); err != nil {
+			return fmt.Errorf("%s.proxy: %w", prefix, err)
 		}
 		key := locationKey(loc)
 		if _, exists := ids[key]; exists {
@@ -3612,6 +3717,18 @@ func envDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func tlsFilesFromEnv() (string, string, bool, error) {
+	cert := strings.TrimSpace(os.Getenv("OLCRTC_MANAGER_TLS_CERT"))
+	key := strings.TrimSpace(os.Getenv("OLCRTC_MANAGER_TLS_KEY"))
+	if cert == "" && key == "" {
+		return "", "", false, nil
+	}
+	if cert == "" || key == "" {
+		return "", "", false, errors.New("OLCRTC_MANAGER_TLS_CERT and OLCRTC_MANAGER_TLS_KEY must be set together")
+	}
+	return cert, key, true, nil
 }
 
 func defaultString(value, fallback string) string {
